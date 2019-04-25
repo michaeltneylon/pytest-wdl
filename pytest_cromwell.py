@@ -11,6 +11,7 @@ Todo:
       switch to using pathlib.Paths. Otherwise get rid of the f-strings.
 """
 import contextlib
+import glob
 import hashlib
 import json
 import logging
@@ -331,20 +332,6 @@ class CromwellHarness:
         else:
             inputs_file = tempfile.mkstemp(suffix=".json")[1]
 
-        write_imports = True
-        if "imports_file" in kwargs:
-            imports_file = os.path.abspath(kwargs["imports_file"])
-            if os.path.exists(imports_file):
-                write_imports = False
-            else:
-                os.makedirs(os.path.dirname(imports_file), exist_ok=True)
-        else:
-            imports_file = tempfile.mkstemp(suffix=".zip")[1]
-
-        java_args = kwargs.get("java_args", self.java_args) or ""
-        cromwell_args = kwargs.get("cromwell_args", self.cromwell_args) or ""
-        wdl_path = self._get_path(wdl_script)
-
         if write_inputs:
             cromwell_inputs = dict(
                 (
@@ -359,21 +346,43 @@ class CromwellHarness:
             with open(inputs_file, "rt") as inp:
                 cromwell_inputs = json.load(inp)
 
-        imports_zip_arg = ""
-        if write_imports and self.import_dirs:
-            imports = " ".join(
-                os.path.join(self.project_root, path, "*.wdl")
-                for path in self.import_dirs
-            )
-            LOG.info(f"Writing imports {imports} to zip file {imports_file}")
-            exe = delegator.run(f"zip -j - {imports} > {imports_file}", block=True)
-            if not exe.ok:
-                raise Exception(
-                    f"Error creating imports zip file; stdout={exe.out}; "
-                    f"stderr={exe.err}"
-                )
-            imports_zip_arg = f"-p {imports_file}"
+        write_imports = bool(self.import_dirs)
+        imports_file = None
+        if "imports_file" in kwargs:
+            imports_file = os.path.abspath(kwargs["imports_file"])
+            if os.path.exists(imports_file):
+                write_imports = False
 
+        if write_imports:
+            imports = [
+                wdl
+                for path in self.import_dirs
+                for wdl in glob.glob(os.path.join(self.project_root, path, "*.wdl"))
+            ]
+            if imports:
+                if imports_file:
+                    os.makedirs(os.path.dirname(imports_file), exist_ok=True)
+                else:
+                    imports_file = tempfile.mkstemp(suffix=".zip")[1]
+
+                imports_str = " ".join(imports)
+
+                LOG.info(f"Writing imports {imports_str} to zip file {imports_file}")
+                exe = delegator.run(
+                    f"zip -j - {imports_str} > {imports_file}", block=True
+                )
+                if not exe.ok:
+                    raise Exception(
+                        f"Error creating imports zip file; stdout={exe.out}; "
+                        f"stderr={exe.err}"
+                    )
+
+        imports_zip_arg = f"-p {imports_file}" if imports_file else ""
+
+        java_args = kwargs.get("java_args", self.java_args) or ""
+        cromwell_args = kwargs.get("cromwell_args", self.cromwell_args) or ""
+        wdl_path = self._get_path(wdl_script, check_exists=True)
+        
         cmd = (
             f"{self.java_bin} {java_args} -jar {self.cromwell_jar} run "
             f"{cromwell_args} -i {inputs_file} {imports_zip_arg} {wdl_path}"
@@ -399,9 +408,11 @@ class CromwellHarness:
             else:
                 assert expected_value == outputs[key]
 
-    def _get_path(self, path):
+    def _get_path(self, path, check_exists=False):
         if not os.path.isabs(path):
             path = os.path.join(self.project_root, path)
+        if check_exists and not os.path.exists(path):
+            raise Exception(f"File not found at path {path}")
         return path
 
     @staticmethod
