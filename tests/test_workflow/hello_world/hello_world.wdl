@@ -23,7 +23,7 @@ task hello_world {
   >>>
 
   runtime {
-    docker: "debian:slim-stretch"
+    docker: "debian:stretch-slim"
   }
 
   output {
